@@ -125,14 +125,17 @@ cat <<EOF > /etc/rancher/rke2/audit-policy.yaml
 apiVersion: audit.k8s.io/v1
 kind: Policy
 rules:
-  # Omitir eventos de solo lectura de componentes internos del sistema
+  # No registrar eventos de lectura/lista (genera demasiado ruido)
   - level: None
-    users: ["system:kube-proxy", "system:apiserver", "system:kubelet"]
     verbs: ["get", "watch", "list"]
-  # Registrar a nivel de Metadata todas las demás peticiones
+  # Registrar cambios en Secretos y ConfigMaps a nivel de Metadata (por seguridad)
   - level: Metadata
-    omitStages:
-      - "RequestReceived"
+    resources:
+    - group: ""
+      resources: ["secrets", "configmaps"]
+  # Registrar cambios en el resto a nivel de RequestResponse
+  - level: RequestResponse
+    verbs: ["create", "update", "patch", "delete"]
 EOF
 ```
 
@@ -238,8 +241,6 @@ Ahora ejecutamos la instalación. Es vital especificar que estamos en RKE2 y que
 cilium install
 ```
 
-*Nota: La IP `172.16.9.131` corresponde a tu Master detectada en los logs previos.*
-
 ### Paso 4.3. Verificar la Instalación
 Cilium tardará un par de minutos en levantar sus pods. Puedes monitorear el estado con:
 
@@ -274,245 +275,145 @@ Para confirmar que Cilium está gestionando el tráfico sin depender de iptables
 kubectl exec -it -n kube-system ds/cilium -- cilium status --verbose | grep "KubeProxyReplacement"
 ```
 
+## 5. Unión de Nodos Worker (RKE2 Agents)
+En esta fase, configuraremos los nodos secundarios para que se unan al Control Plane. Al usar el perfil CIS, RKE2 se encargará de configurar el `kubelet` de los workers con el mismo nivel de seguridad que el Master.
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-## Nodo Mestro
-
-### Paso 1: Preparación del Nodo
-
-*  **Crea el archivo de configuración de RKE2**: Antes de instalar RKE2, necesitas decirle que no use sus componentes predeterminados. Para ello, crea un directorio y un archivo de configuración.
-
-    ```sh
-    sudo mkdir -p /etc/rancher/rke2/
-    sudo tee /etc/rancher/rke2/config.yaml > /dev/null <<EOF
-    cni: "none"
-    disable:
-    - rke2-ingress-nginx
-    disable-kube-proxy: true
-    EOF
-    ```
-
-      * `cni: "none"`: Le dice a RKE2 que no instale ningún CNI por defecto.
-      * `disable: - rke2-ingress-nginx`: Desactiva el controlador NGINX Ingress que viene incluido con RKE2.
-      * `disable-kube-proxy: true`: Deshabilita el `kube-proxy` de Kubernetes, ya que Cilium se encargará de esta función.
-
-*  **Instala RKE2 Server:**
-    Una vez que el script finalice, se instalarán los servicios necesarios.
-    ```sh
-    curl -sfL https://get.rke2.io | sudo sh -
-    ```
-
-*  **Habilitar e iniciar el servicio de RKE2:**
-    ```sh
-    sudo systemctl enable --now rke2-server.service
-    ```
-
-> [\!NOTE]
-> En este punto, el clúster estará en funcionamiento, pero los nodos estarán en estado `NotReady` porque aún no tienen un CNI.
-
------
-
-### Paso 2: Instalación de Cilium e Ingress
-
-#### Configurar acceso a `kubectl`
-
-Para interactuar con el clúster, configura el `kubeconfig`:
+### 5.1. Obtener el Token del Master
+Ejecuta este comando **solo en el nodo `master-0**` para obtener la clave secreta de unión:
 
 ```bash
-mkdir -p ~/.kube
-sudo cp /etc/rancher/rke2/rke2.yaml ~/.kube/config
-sudo chown $(id -u):$(id -g) ~/.kube/config
-export KUBECONFIG=~/.kube/config
+cat /var/lib/rancher/rke2/server/node-token
 ```
 
-#### Instalar Cilium con CLI
-
-Cilium se instalará utilizando su CLI oficial para garantizar la mejor configuración.
-
-*  **Instalar Cilium CLI:**
-    ```bash
-    CILIUM_CLI_VERSION=$(curl -s https://raw.githubusercontent.com/cilium/cilium-cli/main/stable.txt)
-    CLI_ARCH=amd64
-    if [ "$(uname -m)" = "aarch64" ]; then CLI_ARCH=arm64; fi
-    
-    curl -L --fail --remote-name-all https://github.com/cilium/cilium-cli/releases/download/${CILIUM_CLI_VERSION}/cilium-linux-${CLI_ARCH}.tar.gz{,.sha256sum}
-    sha256sum --check cilium-linux-${CLI_ARCH}.tar.gz.sha256sum
-    sudo tar xzvfC cilium-linux-${CLI_ARCH}.tar.gz /usr/local/bin
-    rm cilium-linux-${CLI_ARCH}.tar.gz{,.sha256sum}
-    ```
-
-*  **Desplegar Cilium en el clúster:**
-    ```bash
-    cilium install
-    ```
-
-*  **Validar la instalación:**
-    Verifica que todos los componentes estén sanos:
-    ```bash
-    cilium status --wait
-    ```
-    ```sh
-    $ cilium status --wait
-       /¯¯\
-    /¯¯\__/¯¯\    Cilium:         OK
-    \__/¯¯\__/    Operator:       OK
-    /¯¯\__/¯¯\    Hubble:         disabled
-    \__/¯¯\__/    ClusterMesh:    disabled
-       \__/
-    
-    DaemonSet         cilium             Desired: 2, Ready: 2/2, Available: 2/2
-    Deployment        cilium-operator    Desired: 2, Ready: 2/2, Available: 2/2
-    Containers:       cilium-operator    Running: 2
-                      cilium             Running: 2
-    Image versions    cilium             quay.io/cilium/cilium:v1.9.5: 2
-                      cilium-operator    quay.io/cilium/operator-generic:v1.9.5: 2
-    ```
-
-#### Instalar NGINX Ingress Controller
-
-Como desactivamos el Ingress por defecto de RKE2, instalaremos la versión mantenida por la comunidad (o Kubernetes) vía Helm.
-
-*  **Añadir repositorio e instalar:**
-    ```bash
-    helm repo add ingress-nginx https://kubernetes.github.io/ingress-nginx
-    helm repo update
-    
-    helm install ingress-nginx ingress-nginx/ingress-nginx \
-      --namespace ingress-nginx \
-      --create-namespace   
-    ```
-
-*  **Verificar el despliegue:**
-    ```bash
-    kubectl get pods -n ingress-nginx
-    ```
-
-## 2. Nodos Trabajadores (Agents)
-
-Para agregar dos nodos (esclavo) más a tu clúster **RKE2** existente, debes generar un token de unión y luego usarlo para unir los nuevos nodos como agentes.
-
-### Paso 1: Obtener el token del servidor
-
-Para agregar capacidad de cómputo, uniremos nodos adicionales en modo Agente.
+### 5.2. Configurar los Workers (`worker-0` y `worker-1`)
+En **cada nodo worker**, prepara el directorio y el archivo de configuración. Asegúrate de usar la IP del Master y el token que acabas de copiar.
 
 ```bash
-sudo cat /var/lib/rancher/rke2/server/node-token
+mkdir -p /etc/rancher/rke2/
+
+cat <<EOF > /etc/rancher/rke2/config.yaml
+server: https://<TU_NODE_IP_AQUÍ>:9345
+token: <TU_NODE_TOKEN_AQUÍ>
+profile: "cis"
+cni: "none"
+disable-kube-proxy: true
+
+kubelet-arg:
+  - "anonymous-auth=false"
+  - "authorization-mode=Webhook"
+EOF
 ```
 
-### Paso 2: Configurar y Unir el Nuevo Nodo
+### 5.3. Instalación del Binario de Agente
+En **cada nodo worker**, ejecuta el instalador especificando que el tipo es `agent`:
 
-En cada uno de los dos nuevos nodos, debes crear un archivo de configuración para RKE2. Este archivo le dirá al nodo que se una al clúster como un agente y también le indicará que debe usar Cilium como CNI, al igual que el servidor.
-
-*  **Crea el directorio y el archivo de configuración**:
-
-    ```sh
-    sudo mkdir -p /etc/rancher/rke2/
-    sudo tee /etc/rancher/rke2/config.yaml > /dev/null <<EOF
-    server: https://<DIRECCIÓN_IP_DEL_SERVIDOR>:9345
-    token: <TU_TOKEN_OBTENIDO_ARRIBA>
-    cni: "none"
-    disable-kube-proxy: true
-    EOF
-    ```
-
-      * **`<DIRECCIÓN_IP_DEL_SERVIDOR>`**: Reemplaza esto con la dirección IP del nodo donde instalaste RKE2 como servidor.
-      * **`<TU_TOKEN_OBTENIDO_ARRIBA>`**: Reemplaza esto con el token que obtuviste en el paso anterior.
-      * `cni: "none"` y `disable-kube-proxy: true`: Estas líneas son cruciales para asegurar que los nuevos nodos utilicen la misma configuración de red que el servidor principal.
-
-> [\!IMPORTANT]
-> Es crucial mantener `cni: "none"` y `disable-kube-proxy: true` para que la red coincida con la configuración del maestro.
-
-*  **Instalar RKE2 en modo Agente:**
-    ```bash
-    curl -sfL https://get.rke2.io | sudo INSTALL_RKE2_TYPE="agent" sh -
-    ```
-
-*  **Iniciar el servicio:**
-    ```bash
-    sudo systemctl enable --now rke2-agent.service
-    ```
-
-> [\!NOTE]
-> Después de un minuto o dos, los nodos se conectarán al servidor, Cilium se desplegará en ellos y se unirán al clúster.
-
-### Paso 3: Verificar la unión de los nodos
-
-Vuelve al nodo servidor y ejecuta el siguiente comando para ver el estado de los nodos del clúster:
-
-```sh
-kubectl get nodes
+```bash
+curl -sfL https://get.rke2.io | INSTALL_RKE2_TYPE="agent" sh -
 ```
 
-> [\!NOTE]
-> Deberías ver los tres nodos (el servidor y los dos nuevos agentes) en estado **`Ready`**.
+### 5.4. Habilitar e Iniciar el Servicio
+Al igual que con el Master, el primer arranque configurará los certificados locales del worker.
 
-## 3. Añadir Nodo Maestro (Alta Disponibilidad)
+```bash
+systemctl enable rke2-agent.service
+systemctl start rke2-agent.service
+```
 
-Para añadir un **nodo maestro** adicional a un clúster **RKE2** existente, debes instalar el servicio `rke2-server` en el nuevo nodo, apuntándolo al servidor inicial y utilizando el mismo token. Esto crea un clúster de **alta disponibilidad (HA)**.
+### 5.5. Verificación Final
+Vuelve a tu nodo **`master-0`** y verifica que los nuevos nodos aparezcan y que Cilium les asigne una red automáticamente.
 
-### Paso 1: Preparación del Nuevo Servidor Maestro
+```bash
+kubectl get nodes -o wide
+```
 
-De manera similar al primer nodo maestro, necesitas configurar el nuevo nodo maestro para que sepa cómo unirse al clúster y qué componentes deshabilitar.
+## 6. Alta Disponibilidad - Añadir Masters Adicionales (Servers)
+En esta fase, extenderemos el plano de control a un segundo o tercer nodo. Cada nodo Master adicional ejecutará una réplica de `etcd` y del `kube-apiserver`.
 
-*  **Crea el Archivo de Configuración:**
-    Crea el directorio y el archivo de configuración en el **nuevo servidor maestro**.
+### 6.1. Obtener el Token (Si no lo tienes)
+Al igual que con los workers, necesitas el token del primer nodo (`master-0`):
 
-    ```bash
-    sudo mkdir -p /etc/rancher/rke2/
-    sudo tee /etc/rancher/rke2/config.yaml > /dev/null <<EOF
-    server: https://<IP_DEL_SERVIDOR_INICIAL>:9345
-    token: <TU_TOKEN_OBTENIDO>
-    cni: "none"
-    disable:
-    - rke2-ingress-nginx
-    disable-kube-proxy: true
-    EOF
-    ```
+```bash
+cat /var/lib/rancher/rke2/server/node-token
+```
 
-      * **`<IP_DEL_SERVIDOR_INICIAL>:9345`**: Esta línea es **crucial**. Le dice al nuevo servidor que se una al plano de control existente a través de la IP del primer nodo maestro. El puerto por defecto es `9345`.
-      * **`<TU_TOKEN_OBTENIDO>`**: Usa el token que obtuviste del servidor inicial.
-      * Las opciones de `cni: "none"` y `disable-kube-proxy: true` son necesarias para mantener la coherencia con el primer servidor, que usa Cilium y deshabilitó el `kube-proxy`.
+### 6.2. Configurar el nuevo Master (`master-1`)
+En el nuevo nodo, prepara el archivo de configuración. Es vital que el perfil CIS sea idéntico al del primer nodo.
 
-> [\!TIP]
-> El token que usaste o generaste previamente, se puede ver con `cat /var/lib/rancher/rke2/server/node-token` en el servidor inicial.
+```bash
+mkdir -p /etc/rancher/rke2/
 
-### Paso 2: Instalación y Arranque
+cat <<EOF > /etc/rancher/rke2/config.yaml
+server: https://<TU_NODE_MASTER_IP_AQUÍ>:9345
+token: <TU_NODE_TOKEN_AQUÍ>
+profile: "cis"
 
-*  **Instalar RKE2 (Modo Server por defecto):**
-    No especificamos el tipo "agent", por lo que se instala como Server.
-    ```bash
-    curl -sfL https://get.rke2.io | sudo sh -
-    ```
+cni: "none"
+disable-kube-proxy: true
 
+kubelet-arg:
+  - "anonymous-auth=false"
+  - "authorization-mode=Webhook"
+  - "protect-kernel-defaults=true"
 
-*  **Iniciar servicio:**
-    ```bash
-    sudo systemctl enable --now rke2-server.service
-    ```
+kube-apiserver-arg:
+  - "audit-log-path=/var/lib/rancher/rke2/server/logs/audit.log"
+  - "audit-policy-file=/etc/rancher/rke2/audit-policy.yaml"
+  - "audit-log-maxage=30"
+  - "audit-log-maxbackup=10"
+  - "audit-log-maxsize=100"
+  - "profiling=false"
+  - "anonymous-auth=false"
+EOF
+```
 
-### Paso 3: Validación Final
+### Paso 6.4. Definición de la Política de Auditoría (Requisito CIS)
+El perfil CIS exige que el API Server registre eventos críticos. Esta política registra la metadata de las peticiones, excluyendo el ruido generado por los componentes internos del sistema para optimizar el uso de CPU y disco.
 
-En cualquier nodo con acceso a `kubectl`, verifica que el nuevo nodo tenga el rol de `control-plane` y `master`:
+```bash
+cat <<EOF > /etc/rancher/rke2/audit-policy.yaml
+apiVersion: audit.k8s.io/v1
+kind: Policy
+rules:
+  # No registrar eventos de lectura/lista (genera demasiado ruido)
+  - level: None
+    verbs: ["get", "watch", "list"]
+  # Registrar cambios en Secretos y ConfigMaps a nivel de Metadata (por seguridad)
+  - level: Metadata
+    resources:
+    - group: ""
+      resources: ["secrets", "configmaps"]
+  # Registrar cambios en el resto a nivel de RequestResponse
+  - level: RequestResponse
+    verbs: ["create", "update", "patch", "delete"]
+EOF
+```
+
+### 6.5. Preparar el usuario `etcd`
+Como activamos el perfil CIS, el nuevo Master también intentará ejecutar la base de datos con el usuario dedicado. **Debes crearlo antes de iniciar el servicio** para evitar el error que tuvimos anteriormente.
+
+```bash
+groupadd -r etcd
+useradd -r -M -g etcd -s /usr/sbin/nologin -c "RKE2 etcd user" etcd
+```
+
+### 6.6. Instalación y Arranque
+
+Instala el binario de tipo `server` (no `agent`) en el nuevo nodo:
+
+```bash
+# Instalar binario tipo server
+curl -sfL https://get.rke2.io | INSTALL_RKE2_TYPE="server" sh -
+
+# Habilitar e iniciar
+systemctl enable rke2-server.service
+systemctl start rke2-server.service
+```
+
+### 6.7. Verificación de la Base de Datos (etcd)
+Una vez que el servicio inicie, verifica desde cualquier Master que el nuevo nodo se haya unido al quórum de la base de datos:
 
 ```bash
 kubectl get nodes
+# Para ver el estado de salud de etcd:
+kubectl get pods -n kube-system -l component=etcd
 ```
-
-> [\!NOTE]
->Deberías ver el nuevo nodo con el rol **`control-plane`** o **`master`** (y quizás también `etcd`), y su estado eventualmente cambiará a **`Ready`** a medida que Cilium se despliegue en él y se sincronice con el plano de control. El plano de control de tu clúster RKE2 ahora será de **alta disponibilidad**.
