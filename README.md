@@ -113,14 +113,14 @@ useradd -r -M -g etcd -s /usr/sbin/nologin -c "RKE2 etcd user" etcd
 
 *(Nota: En Ubuntu, la ruta correcta para nologin suele ser `/usr/sbin/nologin` en lugar de `/sbin/nologin`).*
 
-### Paso 2.2. Creación de la Estructura de Directorios
+### 2.2. Creación de la Estructura de Directorios
 Preparamos las rutas donde RKE2 buscará su configuración declarativa antes de iniciar el binario.
 
 ```bash
 mkdir -p /etc/rancher/rke2/
 ```
 
-### Paso 2.3. Definición de la Política de Auditoría (Requisito CIS)
+### 2.3. Definición de la Política de Auditoría (Requisito CIS)
 El perfil CIS exige que el API Server registre eventos críticos. Esta política registra la metadata de las peticiones, excluyendo el ruido generado por los componentes internos del sistema para optimizar el uso de CPU y disco.
 
 ```bash
@@ -244,7 +244,7 @@ Ahora ejecutamos la instalación. Es vital especificar que estamos en RKE2 y que
 cilium install
 ```
 
-### Paso 4.3. Verificar la Instalación
+### 4.3. Verificar la Instalación
 Cilium tardará un par de minutos en levantar sus pods. Puedes monitorear el estado con:
 
 ```bash
@@ -271,7 +271,7 @@ Image versions    cilium             quay.io/cilium/cilium:v1.9.5: 2
 kubectl get nodes
 ```
 
-### Paso 4.4. Validar el Enrutamiento eBPF
+### 4.4. Validar el Enrutamiento eBPF
 Para confirmar que Cilium está gestionando el tráfico sin depender de iptables heredadas, ejecuta:
 
 ```bash
@@ -369,7 +369,7 @@ kube-apiserver-arg:
 EOF
 ```
 
-### Paso 6.4. Definición de la Política de Auditoría (Requisito CIS)
+### 6.4. Definición de la Política de Auditoría (Requisito CIS)
 El perfil CIS exige que el API Server registre eventos críticos. Esta política registra la metadata de las peticiones, excluyendo el ruido generado por los componentes internos del sistema para optimizar el uso de CPU y disco.
 
 ```bash
