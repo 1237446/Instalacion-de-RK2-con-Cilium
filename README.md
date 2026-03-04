@@ -1,6 +1,120 @@
 # Instalacion de RK2 con Cilium
-
 Para instalar **RKE2** con **Cilium** y un Ingress controller, el proceso se divide en dos fases principales: prepararacion del nodo e instalacion de componentes.
+
+## 1. Preparación de Nodos (Ubuntu Server) para RKE2, Cilium y Rook-Ceph
+Esta fase configura el sistema operativo base para cumplir con los requisitos del perfil CIS de RKE2, prepara el entorno para el enrutamiento eBPF puro de Cilium y deja listos los prerrequisitos de almacenamiento en bloque para Rook-Ceph.
+Ejecutar los siguientes pasos como `root` en **todos los nodos** del clúster:
+
+### Paso 1.1 Actualización del Sistema y Desactivación de Swap
+Kubernetes requiere que la memoria swap esté completamente deshabilitada para una correcta asignación de recursos del kubelet.
+
+```bash
+# Actualizar paquetes del sistema
+apt update && apt upgrade -y
+
+# Deshabilitar swap en caliente
+swapoff -a
+
+# Comentar la línea de swap en fstab para persistencia tras reinicios
+sed -i '/ swap / s/^\(.*\)$/#\1/g' /etc/fstab
+```
+
+### Paso 1.2. Instalación de Dependencias Críticas
+Se requieren herramientas específicas para la gestión de tráfico, eBPF y la administración de volúmenes lógicos y cifrado. En Ubuntu, los nombres de algunos paquetes cambian (como `open-iscsi` en lugar de `iscsi-initiator-utils` y `iproute2` en lugar de `iproute-tc`).
+
+```bash
+# Instalar utilidades requeridas
+apt install -y tar curl iptables iproute2 lvm2 open-iscsi cryptsetup
+
+# Habilitar el demonio iSCSI (Rook-Ceph lo requiere activo en Ubuntu)
+systemctl enable --now iscsid
+```
+
+### Paso 1.3. Carga de Módulos del Kernel
+Habilitamos los módulos necesarios para la superposición de contenedores, la encriptación de red nativa y el almacenamiento en bloque.
+
+```bash
+cat <<EOF > /etc/modules-load.d/k8s.conf
+overlay
+wireguard
+rbd
+ceph
+EOF
+
+# Cargar módulos en la sesión actual
+modprobe overlay
+modprobe wireguard
+modprobe rbd
+modprobe ceph
+```
+
+### Paso 1.4. Ajustes de Kernel (Sysctl)
+
+Aplicamos los parámetros requeridos para el reenvío de paquetes, optimización del compilador JIT para eBPF (Tetragon/Cilium), cumplimiento estricto del perfil CIS y aumento de límites de inotify para el rendimiento del almacenamiento masivo.
+
+```bash
+cat <<EOF > /etc/sysctl.d/99-k8s-cis.conf
+# Enrutamiento de red para Kubernetes y Cilium
+net.ipv4.ip_forward                 = 1
+net.ipv6.conf.all.forwarding        = 1
+
+# Optimizaciones para eBPF (Cilium / Tetragon)
+net.core.bpf_jit_enable             = 1
+
+# Requerimientos estrictos del perfil CIS para RKE2
+vm.panic_on_oom                     = 0
+vm.overcommit_memory                = 1
+kernel.panic                        = 10
+kernel.panic_on_oops                = 1
+
+# Aumentar límites inotify (vital para Rook-Ceph y bases de datos)
+fs.inotify.max_user_instances       = 8192
+fs.inotify.max_user_watches         = 524288
+EOF
+
+# Aplicar los cambios
+sysctl --system
+```
+
+### 1.5. Preparación de Red y Firewall
+A diferencia de Rocky Linux, Ubuntu Server utiliza `systemd-networkd` (mediante Netplan) por defecto, el cual no interfiere automáticamente con las interfaces virtuales de Cilium. Sin embargo, debemos asegurarnos de desactivar el firewall nativo (UFW) para evitar colisiones con las reglas de red que Cilium gestionará de forma autónoma.
+
+```bash
+# Deshabilitar y detener UFW para que Cilium controle el tráfico
+ufw disable
+systemctl stop ufw
+systemctl disable ufw
+```
+
+### 1.6. Verificación de Discos (Rook-Ceph)
+Rook-Ceph requiere discos crudos (*raw disks*) sin formato ni particiones. Confirma la disponibilidad de los bloques de almacenamiento con el siguiente comando:
+
+```bash
+lsblk -f
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 ## Nodo Mestro
 
