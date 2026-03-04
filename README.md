@@ -164,9 +164,99 @@ kube-apiserver-arg:
 EOF
 ```
 
+## 3. Instalación y Arranque del Control Plane (RKE2)
+En este punto, RKE2 consumirá el `config.yaml` de la Fase 2, aplicará el perfil de seguridad CIS y levantará los servicios base.
+Ejecuta los siguientes pasos como `root` en tu nodo **`master-0`**:
 
+### 3.1. Descarga e Instalación del Binario
+Utilizaremos el script oficial. Al detectar que estás en Ubuntu, el script instalará el paquete `.deb` correspondiente y configurará los servicios de `systemd`.
 
+```bash
+curl -sfL https://get.rke2.io | INSTALL_RKE2_TYPE="server" sh -
+```
 
+### 3.2. Habilitar e Iniciar el Servicio
+Este es el paso donde RKE2 descarga las imágenes de sistema (v1.34.3) y genera los certificados. Ten paciencia, puede tardar de **3 a 5 minutos**.
+
+```bash
+systemctl enable rke2-server.service
+systemctl start rke2-server.service
+```
+
+**Tip de monitoreo:** Tal como hicimos antes, puedes ver el progreso real y detectar cualquier bloqueo de permisos con:
+`journalctl -u rke2-server -f`
+
+### 3.3. Configuración del Entorno (`kubectl`)
+RKE2 coloca sus binarios en `/var/lib/rancher/rke2/bin/`. Vamos a configurar tu acceso para que `kubectl` funcione directamente.
+
+```bash
+# Crear el directorio de configuración
+mkdir -p ~/.kube
+
+# Vincular el kubeconfig generado (con permisos 0600 automáticos)
+cp /etc/rancher/rke2/rke2.yaml ~/.kube/config
+
+# Configurar el PATH para que reconozca los binarios de RKE2
+export PATH=$PATH:/var/lib/rancher/rke2/bin
+echo 'export PATH=$PATH:/var/lib/rancher/rke2/bin' >> ~/.bashrc
+```
+
+### 3.4. Verificación del Estado de Salud
+Ahora validaremos que el clúster esté vivo pero "esperando" su red (Cilium).
+
+```bash
+# Deberías ver el nodo master-0 como "NotReady" (normal sin CNI)
+kubectl get nodes
+
+# Deberías ver los componentes core (etcd, apiserver) levantados
+kubectl get pods -A
+```
+
+## 4. Instalación de Cilium CNI mediante CLI (Modo eBPF Nativo)
+En esta fase, instalaremos la herramienta de línea de comandos de Cilium y desplegaremos el agente en el clúster. Al usar RKE2 con el perfil CIS, Cilium se encargará de gestionar las políticas de red y el reemplazo de `kube-proxy`.
+
+### 4.1. Instalar el Cilium CLI en el Master
+Primero, descargamos el binario de gestión de Cilium directamente en tu nodo `master-0`.
+
+```bash
+CILIUM_CLI_VERSION=$(curl -s https://raw.githubusercontent.com/cilium/cilium-cli/main/stable.txt)
+CLI_ARCH=amd64
+if [ "$(uname -m)" = "aarch64" ]; then CLI_ARCH=arm64; fi
+
+curl -L --fail --remote-name-all https://github.com/cilium/cilium-cli/releases/download/${CILIUM_CLI_VERSION}/cilium-linux-${CLI_ARCH}.tar.gz{,.sha256sum}
+sha256sum --check cilium-linux-${CLI_ARCH}.tar.gz.sha256sum
+tar xzvf cilium-linux-${CLI_ARCH}.tar.gz
+sudo install -m 0755 cilium /usr/local/bin/cilium
+rm cilium-linux-${CLI_ARCH}.tar.gz{,.sha256sum}
+```
+
+### 4.2. Desplegar Cilium en el Clúster
+
+Ahora ejecutamos la instalación. Es vital especificar que estamos en RKE2 y que queremos habilitar el reemplazo de `kube-proxy`.
+
+```bash
+cilium install
+```
+
+*Nota: La IP `172.16.9.131` corresponde a tu Master detectada en los logs previos.*
+
+### Paso 4.3. Verificar la Instalación
+Cilium tardará un par de minutos en levantar sus pods. Puedes monitorear el estado con:
+
+```bash
+# Verificar el estado desde la CLI de Cilium
+cilium status --wait
+
+# Verificar que los nodos pasen a estado "Ready"
+kubectl get nodes
+```
+
+### Paso 4.4. Validar el Enrutamiento eBPF
+Para confirmar que Cilium está gestionando el tráfico sin depender de iptables heredadas, ejecuta:
+
+```bash
+kubectl exec -it -n kube-system ds/cilium -- cilium status --verbose | grep "KubeProxyReplacement"
+```
 
 
 
