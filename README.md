@@ -93,6 +93,76 @@ Rook-Ceph requiere discos crudos (*raw disks*) sin formato ni particiones. Confi
 lsblk -f
 ```
 
+## 2. Configuración Previa del Control Plane (RKE2)
+En esta fase, prepararemos el entorno base del sistema operativo y la configuración declarativa para RKE2 en Ubuntu. Esto incluye la creación manual del usuario de servicio para la base de datos y la definición del archivo principal de configuración (`config.yaml`) para cumplir con el estándar CIS y delegar la red a Cilium.
+Ejecutar los siguientes pasos como `root` en el nodo destinado a ser el primer **Control Plane** (`master-0`):
+
+### 2.1. Creación del usuario y grupo de base de datos (`etcd`)
+Para cumplir con el perfil CIS (los procesos de base de datos no deben correr como `root`), creamos preventivamente el usuario de servicio estricto. Esto evita que el servicio falle al intentar arrancar por primera vez.
+
+```bash
+# Crear el grupo del sistema
+groupadd -r etcd
+
+# Crear el usuario asignado a ese grupo sin acceso a shell ni directorio home
+useradd -r -M -g etcd -s /usr/sbin/nologin -c "RKE2 etcd user" etcd
+```
+
+*(Nota: En Ubuntu, la ruta correcta para nologin suele ser `/usr/sbin/nologin` en lugar de `/sbin/nologin`).*
+
+### Paso 2.2. Creación de la Estructura de Directorios
+Preparamos las rutas donde RKE2 buscará su configuración declarativa antes de iniciar el binario.
+
+```bash
+mkdir -p /etc/rancher/rke2/
+```
+
+### Paso 2.3. Definición de la Política de Auditoría (Requisito CIS)
+El perfil CIS exige que el API Server registre eventos críticos. Esta política registra la metadata de las peticiones, excluyendo el ruido generado por los componentes internos del sistema para optimizar el uso de CPU y disco.
+
+```bash
+cat <<EOF > /etc/rancher/rke2/audit-policy.yaml
+apiVersion: audit.k8s.io/v1
+kind: Policy
+rules:
+  # Omitir eventos de solo lectura de componentes internos del sistema
+  - level: None
+    users: ["system:kube-proxy", "system:apiserver", "system:kubelet"]
+    verbs: ["get", "watch", "list"]
+  # Registrar a nivel de Metadata todas las demás peticiones
+  - level: Metadata
+    omitStages:
+      - "RequestReceived"
+EOF
+```
+
+### 2.4. Creación del Manifiesto Principal (`config.yaml`)
+Este archivo define la identidad y la postura de seguridad del clúster. Destacan el cumplimiento del CIS Benchmark, la encriptación de secretos en etcd y la desactivación del CNI por defecto (`rke2-canal`) y de `kube-proxy` para ceder el control del enrutamiento a Cilium eBPF.
+
+```bash
+cat <<EOF > /etc/rancher/rke2/config.yaml
+# --- Seguridad Base ---
+cni: "none"
+profile: "cis"
+disable:
+- rke2-ingress-nginx
+disable-kube-proxy: true
+
+kubelet-arg:
+  - "anonymous-auth=false"
+  - "authorization-mode=Webhook"
+  - "protect-kernel-defaults=true"
+
+kube-apiserver-arg:
+  - "audit-log-path=/var/lib/rancher/rke2/server/logs/audit.log"
+  - "audit-policy-file=/etc/rancher/rke2/audit-policy.yaml"
+  - "audit-log-maxage=30"
+  - "audit-log-maxbackup=10"
+  - "audit-log-maxsize=100"
+  - "profiling=false"
+  - "anonymous-auth=false"
+EOF
+```
 
 
 
