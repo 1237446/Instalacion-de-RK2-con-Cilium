@@ -247,6 +247,22 @@ Cilium tardará un par de minutos en levantar sus pods. Puedes monitorear el est
 # Verificar el estado desde la CLI de Cilium
 cilium status --wait
 
+   /¯¯\
+/¯¯\__/¯¯\    Cilium:         OK
+\__/¯¯\__/    Operator:       OK
+/¯¯\__/¯¯\    Hubble:         disabled
+\__/¯¯\__/    ClusterMesh:    disabled
+   \__/
+
+DaemonSet         cilium             Desired: 2, Ready: 2/2, Available: 2/2
+Deployment        cilium-operator    Desired: 2, Ready: 2/2, Available: 2/2
+Containers:       cilium-operator    Running: 2
+                  cilium             Running: 2
+Image versions    cilium             quay.io/cilium/cilium:v1.9.5: 2
+                  cilium-operator    quay.io/cilium/operator-generic:v1.9.5: 2
+```
+
+```bash
 # Verificar que los nodos pasen a estado "Ready"
 kubectl get nodes
 ```
